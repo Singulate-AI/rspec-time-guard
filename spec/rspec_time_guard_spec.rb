@@ -45,7 +45,7 @@ RSpec.describe RspecTimeGuard do
   end
 
   describe "time monitoring" do
-    def run_with_time_guard(time_limit_seconds, continue_on_timeout: false, &example_block)
+    def run_with_time_guard(time_limit_seconds, continue_on_timeout: false, simulate_timeout: false, &example_block)
       # Setup configuration
       RspecTimeGuard.configure do |config|
         config.continue_on_timeout = continue_on_timeout
@@ -72,23 +72,16 @@ RSpec.describe RspecTimeGuard do
 
       allow(ObjectSpace).to receive(:_id2ref).and_return(test_thread)
       test_info = monitor.instance_variable_get(:@active_tests)[example.object_id]
-      test_info[:start_time] = Time.now - time_limit_seconds - 0.1 if test_info
+      if simulate_timeout && test_info
+        test_info[:start_time] = Process.clock_gettime(Process::CLOCK_MONOTONIC) - time_limit_seconds - 0.1
+      end
 
       # Run the test
       begin
         example.run
 
-        # For tests with continue_on_timeout, we need to:
-        # 1. Simulate a timeout condition
-        # 2. Manually trigger the check to generate the warning
-        if continue_on_timeout
-          # Ensure the test appears to have timed out (same backdating we did earlier)
-          test_info = monitor.instance_variable_get(:@active_tests)[example.object_id]
-          test_info[:start_time] = Time.now - time_limit_seconds * 2 if test_info
-
-          # Now trigger the timeout check to generate the warning
-          monitor.send(:check_for_timeouts)
-        end
+        # Trigger twice to verify that continue_on_timeout warns only once.
+        2.times { monitor.send(:check_for_timeouts) } if simulate_timeout
       rescue RspecTimeGuard::TimeLimitExceededError => e
         example.exception = e
       ensure
@@ -106,7 +99,7 @@ RSpec.describe RspecTimeGuard do
       end
 
       it "sets example.exception when example exceeds time limit" do
-        exception = run_with_time_guard(0.1) { sleep 0.01 } # Short sleep, we simulate timeout
+        exception = run_with_time_guard(0.1, simulate_timeout: true) { sleep 0.01 }
         expect(exception).to be_a(RspecTimeGuard::TimeLimitExceededError)
       end
     end
@@ -114,7 +107,7 @@ RSpec.describe RspecTimeGuard do
     context "with continue_on_timeout enabled" do
       it "outputs a warning but allows the example to complete" do
         expect do
-          run_with_time_guard(0.1, continue_on_timeout: true) { sleep 0.2 }
+          run_with_time_guard(0.1, continue_on_timeout: true, simulate_timeout: true) { sleep 0.2 }
         end.to output(/WARNING \[RSpecTimeGuard\]/).to_stderr
       end
 
@@ -122,7 +115,7 @@ RSpec.describe RspecTimeGuard do
         execution_completed = false
 
         expect do
-          run_with_time_guard(0.1, continue_on_timeout: true) do
+          run_with_time_guard(0.1, continue_on_timeout: true, simulate_timeout: true) do
             sleep 0.2
             execution_completed = true
           end
@@ -137,7 +130,7 @@ RSpec.describe RspecTimeGuard do
         $stderr = StringIO.new
 
         begin
-          run_with_time_guard(0.1, continue_on_timeout: true) do
+          run_with_time_guard(0.1, continue_on_timeout: true, simulate_timeout: true) do
             sleep 0.3 # Sleep long enough to trigger multiple checks
           end
 
@@ -214,7 +207,7 @@ RSpec.describe RspecTimeGuard do
         expect(test_info[:timeout]).to eq(0.5)
         expect(test_info[:thread_id]).to eq(thread.object_id)
         expect(test_info[:warned]).to eq(false)
-        expect(test_info[:start_time]).to be_a(Time)
+        expect(test_info[:start_time]).to be_a(Float)
       end
 
       it "starts a monitor thread if none is running" do
